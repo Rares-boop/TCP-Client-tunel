@@ -32,24 +32,20 @@ public class LoginActivity extends AppCompatActivity {
         EdgeToEdge.enable(this);
         setContentView(R.layout.activity_login);
 
-        // Ajustare pentru edge-to-edge
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.loginLayout), (v, insets) -> {
             Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom);
             return insets;
         });
 
-        // 1. Initializare ConfigReader (pt Ngrok)
         config = new ConfigReader(this);
 
-        // 2. Initializare Preferinte (Secure sau Standard fallback)
         try {
             preferences = SecureStorage.getEncryptedPrefs(getApplicationContext());
         } catch (Exception e) {
             preferences = getSharedPreferences("ChatPrefs", MODE_PRIVATE);
         }
 
-        // 3. Verificare Auto-Login
         CheckBox checkBox = findViewById(R.id.checkBoxKeepSignedIn);
         if (preferences.contains("username")) {
             checkBox.setChecked(true);
@@ -70,30 +66,23 @@ public class LoginActivity extends AppCompatActivity {
             return;
         }
 
-        // Dezactivam interfata sa nu apese de doua ori
         setButtonsEnabled(false);
         Toast.makeText(this, "Se conecteaza...", Toast.LENGTH_SHORT).show();
 
         new Thread(() -> {
             try {
-                // A. Curatenie
                 TcpConnection.close();
 
-                // B. Conectare (Folosind ConfigReader pt Ngrok)
-                // Aici se face Handshake-ul PQC/AES automat
                 TcpConnection.connect(config.getServerIp(), config.getServerPort());
 
-                // C. Trimitere Login (Va fi criptat prin Tunel automat)
                 ChatDtos.AuthDto loginData = new ChatDtos.AuthDto(username, password);
                 NetworkPacket requestPacket = new NetworkPacket(PacketType.LOGIN_REQUEST, 0, loginData);
                 TcpConnection.sendPacket(requestPacket);
 
-                // D. Citire Raspuns (Sincron - asteptam aici)
-                // Nota: Asigura-te ca readNextPacket() e PUBLIC in TcpConnection
                 NetworkPacket responsePacket = TcpConnection.readNextPacket();
 
                 runOnUiThread(() -> {
-                    setButtonsEnabled(true); // Reactivam butoanele
+                    setButtonsEnabled(true);
 
                     if (responsePacket != null && responsePacket.getType() == PacketType.LOGIN_RESPONSE) {
                         handleLoginResponse(responsePacket, username, password, checkBox.isChecked());
@@ -118,16 +107,13 @@ public class LoginActivity extends AppCompatActivity {
         try {
             JsonElement payload = packet.getPayload();
 
-            // Verificam daca e User (obiect JSON) sau Eroare (String)
             if (payload.isJsonObject()) {
                 User user = gson.fromJson(payload, User.class);
 
                 if (user != null && user.getUsername() != null) {
-                    // SUCCES - Salvam userul global
                     TcpConnection.setCurrentUser(user);
                     TcpConnection.setCurrentUserId(user.getId());
 
-                    // Salvam credentialele daca e bifat
                     SharedPreferences.Editor editor = preferences.edit();
                     if (keepSignedIn) {
                         editor.putString("username", username);
@@ -138,13 +124,11 @@ public class LoginActivity extends AppCompatActivity {
                     }
                     editor.apply();
 
-                    // Pornim MainActivity
                     Intent intent = new Intent(LoginActivity.this, MainActivity.class);
                     startActivity(intent);
                     finish();
                 }
             } else {
-                // EROARE LOGIN (ex: "Password incorrect")
                 String errorMsg = gson.fromJson(payload, String.class);
                 showSnackbar(errorMsg);
                 TcpConnection.close();
@@ -166,7 +150,6 @@ public class LoginActivity extends AppCompatActivity {
         new Thread(() -> {
             try {
                 TcpConnection.close();
-                // Folosim ConfigReader si aici!
                 TcpConnection.connect(config.getServerIp(), config.getServerPort());
 
                 ChatDtos.AuthDto loginData = new ChatDtos.AuthDto(savedUser, savedPass);
@@ -190,7 +173,6 @@ public class LoginActivity extends AppCompatActivity {
                             }
                         } catch (Exception e) {}
                     }
-                    // Daca ajungem aici, a esuat auto-login
                     handleAutoLoginFail();
                 });
             } catch (Exception e) {
@@ -203,7 +185,6 @@ public class LoginActivity extends AppCompatActivity {
         TcpConnection.close();
         Toast.makeText(this, "Auto-login esuat.", Toast.LENGTH_SHORT).show();
         setButtonsEnabled(true);
-        // Nu stergem preferintele automat, poate doar a picat netul momentan
     }
 
     public void handleRegister(View view) {

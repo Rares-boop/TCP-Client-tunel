@@ -24,21 +24,15 @@ public class TcpConnection {
     private static ObjectOutputStream out;
     private static ObjectInputStream in;
 
-    // User Logat - Variabile statice
     private static User currentUser;
     private static int currentUserId;
 
-    // Cheia TUNELULUI (Kyber/AES cu Serverul)
     private static SecretKey sessionKey = null;
 
     static {
         Security.removeProvider("BC");
         Security.addProvider(new BouncyCastleProvider());
     }
-
-    // =================================================================
-    // 1. SISTEMUL DE ASCULTARE (OBSERVER PATTERN)
-    // =================================================================
 
     public interface PacketListener {
         void onPacketReceived(NetworkPacket packet);
@@ -48,13 +42,11 @@ public class TcpConnection {
     private static Thread readingThread;
     private static volatile boolean isReading = false;
 
-    // Activitatile apeleaza asta in onResume()
     public static void setPacketListener(PacketListener listener) {
         currentListener = listener;
         Log.d("TCP", "Listener setat: " + (listener == null ? "NULL" : listener.getClass().getSimpleName()));
     }
 
-    // Pornim o singura data, dupa Login (in MainActivity)
     public static void startReading() {
         if (isReading) return;
         isReading = true;
@@ -63,7 +55,6 @@ public class TcpConnection {
             Log.d("TCP", "🚀 Listener Thread PORNIT.");
             try {
                 while (isReading && socket != null && !socket.isClosed()) {
-                    // Blocant: Citeste pachete de la server
                     NetworkPacket packet = readNextPacket();
 
                     if (packet == null) {
@@ -72,7 +63,6 @@ public class TcpConnection {
                         break;
                     }
 
-                    // Trimite la UI (Activity curent)
                     if (currentListener != null) {
                         currentListener.onPacketReceived(packet);
                     } else {
@@ -91,10 +81,6 @@ public class TcpConnection {
         isReading = false;
     }
 
-    // =================================================================
-    // 2. CONECTARE & HANDSHAKE
-    // =================================================================
-
     public static void connect(String host, int port) throws Exception {
         socket = new Socket(host, port);
         out = new ObjectOutputStream(socket.getOutputStream());
@@ -111,7 +97,6 @@ public class TcpConnection {
         try {
             Log.d("TCP", "⏳ Start Handshake...");
 
-            // 1. Primim Hello de la Server (Public Key)
             String jsonHello = (String) in.readObject();
             NetworkPacket helloPacket = NetworkPacket.fromJson(jsonHello);
 
@@ -119,14 +104,11 @@ public class TcpConnection {
                 String serverPubBase64 = helloPacket.getPayload().getAsString();
                 byte[] serverPubBytes = Base64.decode(serverPubBase64, Base64.NO_WRAP);
 
-                // 2. Encapsulam cheia AES
                 PublicKey serverKyberPub = CryptoHelper.decodeKyberPublicKey(serverPubBytes);
                 CryptoHelper.KEMResult result = CryptoHelper.encapsulate(serverKyberPub);
 
-                // Salvam cheia TUNELULUI
                 sessionKey = result.aesKey;
 
-                // 3. Trimitem inapoi (Finish)
                 byte[] wrappedBytes = result.wrappedKey;
                 String wrappedBase64 = Base64.encodeToString(wrappedBytes, Base64.NO_WRAP);
                 NetworkPacket finishPacket = new NetworkPacket(PacketType.KYBER_CLIENT_FINISH, 0, wrappedBase64);
@@ -144,11 +126,6 @@ public class TcpConnection {
         }
     }
 
-    // =================================================================
-    // 3. TRIMITERE & CITIRE INTELIGENTA
-    // =================================================================
-
-    // Lista alba: Pachete care TREC LIBER prin server (sunt deja securizate E2E de client)
     private static boolean isExemptFromTunnel(PacketType type) {
         return type == PacketType.SEND_MESSAGE ||
                 type == PacketType.RECEIVE_MESSAGE ||
@@ -164,7 +141,6 @@ public class TcpConnection {
 
                     // LOGICA HIBRIDA:
                     if (sessionKey != null && !isExemptFromTunnel(packet.getType())) {
-                        // A. TUNEL: Pachet normal (Login, Create Chat) -> CRIPTAM CU AES SERVER
                         String clearJson = packet.toJson();
                         byte[] encryptedBytes = CryptoHelper.encryptAndPack(sessionKey, clearJson);
                         String encryptedBase64 = Base64.encodeToString(encryptedBytes, Base64.NO_WRAP);
@@ -176,7 +152,6 @@ public class TcpConnection {
                             out.flush();
                         }
                     } else {
-                        // B. PASS-THROUGH: Pachet E2E (Mesaje) -> TRIMITEM DIRECT (JSON)
                         synchronized (out) {
                             out.writeObject(packet.toJson());
                             out.flush();
@@ -189,14 +164,11 @@ public class TcpConnection {
         }).start();
     }
 
-    // ATENTIE: Am facut metoda asta PUBLICA pentru LoginActivity!
     public static NetworkPacket readNextPacket() throws Exception {
         String jsonRaw = (String) in.readObject();
         NetworkPacket packet = NetworkPacket.fromJson(jsonRaw);
 
-        // LOGICA REVERSA HIBRIDA:
 
-        // A. Daca e PLIC (Secure Envelope) -> DECRIPTAM TUNELUL
         if (sessionKey != null && packet.getType() == PacketType.SECURE_ENVELOPE) {
             try {
                 String encryptedPayload = packet.getPayload().getAsString();
@@ -209,17 +181,12 @@ public class TcpConnection {
                 throw e;
             }
         }
-        // B. Daca e MESAJ E2E -> Vine direct
         else if (isExemptFromTunnel(packet.getType())) {
-            // Log.d("TCP", "📨 Pachet E2E Primit Direct: " + packet.getType());
+             Log.d("TCP", "📨 Pachet primit direct: " + packet.getType());
         }
 
         return packet;
     }
-
-    // =================================================================
-    // 4. CLEANUP & GETTERS/SETTERS (Astea lipseau)
-    // =================================================================
 
     public static void close() {
         try {
@@ -233,8 +200,6 @@ public class TcpConnection {
             e.printStackTrace();
         }
     }
-
-    // --- GETTERS & SETTERS PENTRU USER ---
 
     public static void setCurrentUser(User user) {
         currentUser = user;

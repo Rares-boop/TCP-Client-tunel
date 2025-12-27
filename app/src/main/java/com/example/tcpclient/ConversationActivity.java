@@ -9,6 +9,7 @@ import android.util.Log;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.TextView;
+import android.widget.Toast;
 import android.window.OnBackInvokedDispatcher;
 
 import androidx.activity.EdgeToEdge;
@@ -27,20 +28,22 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.crypto.SecretKey;
+
 import chat.ChatDtos;
+import chat.CryptoHelper;
 import chat.Message;
 import chat.NetworkPacket;
 import chat.PacketType;
 
 public class ConversationActivity extends AppCompatActivity {
-    // Folosim volatile pt thread safety
     public volatile List<Message> messages = new ArrayList<>();
     RecyclerView recyclerView;
     MessageAdapter messageAdapter;
 
     private int currentChatId = -1;
-    private int partnerId = -1;
     private final Gson gson = new Gson();
+    private ClientKeyManager keyManager;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,16 +72,15 @@ public class ConversationActivity extends AppCompatActivity {
             );
         }
 
-        // INIT DATA
+        keyManager = new ClientKeyManager(this);
+
         Intent intent = getIntent();
         String chatName = intent.getStringExtra("CHAT_NAME");
         currentChatId = intent.getIntExtra("CHAT_ID", -1);
-        partnerId = intent.getIntExtra("PARTNER_ID", -1);
 
         TextView txtChatName = findViewById(R.id.txtChatName);
         if(chatName != null) txtChatName.setText(chatName);
 
-        // RECYCLER SETUP
         recyclerView = findViewById(R.id.recyclerViewMessages);
         messageAdapter = new MessageAdapter(this, messages, TcpConnection.getCurrentUserId(), this::handleLongMessageClick);
 
@@ -89,39 +91,80 @@ public class ConversationActivity extends AppCompatActivity {
 
         View btnBack = findViewById(R.id.btnBackArrow);
         btnBack.setOnClickListener(v -> handleBackPress());
+
+        checkAndGenerateKey();
     }
 
-    // =================================================================
-    // 1. LIFECYCLE & LISTENER
-    // =================================================================
+    private void checkAndGenerateKey() {
+        if (currentChatId == -1) return;
+
+        if (!keyManager.hasKey(currentChatId)) {
+            Log.d("CHAT_KEY", "⚠️ Nu am cheie pt Chat " + currentChatId + ". Generez una noua...");
+
+            String newKeyBase64 = keyManager.generateAndSaveKey(currentChatId);
+
+            if (newKeyBase64 != null) {
+                ChatDtos.SessionKeyDto dto = new ChatDtos.SessionKeyDto(currentChatId, newKeyBase64);
+                NetworkPacket p = new NetworkPacket(PacketType.EXCHANGE_SESSION_KEY, TcpConnection.getCurrentUserId(), dto);
+                TcpConnection.sendPacket(p);
+
+                Log.d("CHAT_KEY", "📤 Cheie generata si trimisa la server!");
+            }
+        } else {
+            Log.d("CHAT_KEY", "✅ Avem deja cheie criptata in Keystore.");
+        }
+    }
+
+    private void decryptMessageInPlace(Message m) {
+        SecretKey key = keyManager.getKey(currentChatId);
+        if (key == null) return;
+
+        try {
+            String clearText = CryptoHelper.unpackAndDecrypt(key, m.getContent());
+            m.setContent(clearText.getBytes());
+        } catch (Exception e) {
+            // Log.e("DECRYPT", "Fail (probabil cheie veche): " + e.getMessage());
+        }
+    }
 
     @Override
     protected void onResume() {
         super.onResume();
-        Log.d("CHAT_UI", "🔵 onResume: Pornesc ascultarea...");
-
-        // Setam listener-ul sa pointeze catre aceasta activitate
         TcpConnection.setPacketListener(this::handlePacketOnUI);
-
         sendEnterChatRequest();
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        Log.d("CHAT_UI", "⚫ onPause: Opresc ascultarea UI.");
         TcpConnection.setPacketListener(null);
         sendExitChatRequest();
     }
 
     private void handlePacketOnUI(NetworkPacket packet) {
-        // Fortam rularea pe UI Thread ca sa poata atinge RecyclerView
         runOnUiThread(() -> handlePacket(packet));
     }
 
     private void handlePacket(NetworkPacket packet) {
         try {
             switch (packet.getType()) {
+                case EXCHANGE_SESSION_KEY:
+                    ChatDtos.SessionKeyDto keyDto = gson.fromJson(packet.getPayload(), ChatDtos.SessionKeyDto.class);
+
+                    Log.d("KEY_DEBUG", "Am primit o cheie pt ChatID: " + keyDto.chatId + " | ChatCurent: " + currentChatId);
+
+                    if (keyDto.chatId == currentChatId) {
+                        keyManager.saveKey(keyDto.chatId, keyDto.aesKeyBase64);
+
+                        Toast.makeText(this, "🔐 Cheie primită! Mesajele se vor decripta.", Toast.LENGTH_SHORT).show();
+
+                        messageAdapter.notifyDataSetChanged();
+                    } else {
+                        keyManager.saveKey(keyDto.chatId, keyDto.aesKeyBase64);
+                        Log.d("KEY_DEBUG", "Cheie salvata in fundal.");
+                    }
+                    break;
+
                 case GET_MESSAGES_RESPONSE:
                     Log.d("CHAT_UI", "📜 Istoric primit!");
                     Type listType = new TypeToken<List<Message>>(){}.getType();
@@ -129,25 +172,21 @@ public class ConversationActivity extends AppCompatActivity {
 
                     messages.clear();
                     if (history != null) {
+                        for(Message m : history) decryptMessageInPlace(m);
                         messages.addAll(history);
                     }
-                    // Aici folosim notifyDataSetChanged ca e lista noua
                     messageAdapter.notifyDataSetChanged();
                     scrollToBottom();
                     break;
 
                 case RECEIVE_MESSAGE:
-                    // AICI ERA PROBLEMA PROBABIL
-                    Log.d("CHAT_UI", "✅ [UI] MESAJ NOU PRIMIT in timp real!");
-
+                    Log.d("CHAT_UI", "✅ [UI] MESAJ NOU PRIMIT!");
                     Message msg = gson.fromJson(packet.getPayload(), Message.class);
                     if (msg != null) {
+                        decryptMessageInPlace(msg);
                         messages.add(msg);
-                        // Folosim notifyDataSetChanged pt siguranta maxima la inceput
                         messageAdapter.notifyDataSetChanged();
                         scrollToBottom();
-                    } else {
-                        Log.e("CHAT_UI", "❌ Mesajul primit e NULL!");
                     }
                     break;
 
@@ -155,7 +194,19 @@ public class ConversationActivity extends AppCompatActivity {
                     ChatDtos.EditMessageDto editDto = gson.fromJson(packet.getPayload(), ChatDtos.EditMessageDto.class);
                     for (int i = 0; i < messages.size(); i++) {
                         if (messages.get(i).getId() == editDto.messageId) {
-                            messages.get(i).setContent(editDto.newContent);
+
+                            byte[] finalContent = editDto.newContent;
+
+                            SecretKey key = keyManager.getKey(currentChatId);
+                            if (key != null) {
+                                try {
+                                    String decrypted = CryptoHelper.unpackAndDecrypt(key, editDto.newContent);
+                                    finalContent = decrypted.getBytes();
+                                } catch (Exception e) {
+                                }
+                            }
+
+                            messages.get(i).setContent(finalContent);
                             messageAdapter.notifyItemChanged(i);
                             break;
                         }
@@ -167,7 +218,7 @@ public class ConversationActivity extends AppCompatActivity {
                     for (int i = 0; i < messages.size(); i++) {
                         if (messages.get(i).getId() == deletedId) {
                             messages.remove(i);
-                            messageAdapter.notifyDataSetChanged(); // Mai sigur la stergere
+                            messageAdapter.notifyDataSetChanged();
                             break;
                         }
                     }
@@ -177,19 +228,12 @@ public class ConversationActivity extends AppCompatActivity {
                     finish();
                     break;
 
-                case ENTER_CHAT_RESPONSE:
-                    Log.d("CHAT_UI", "✅ Server a confirmat intrarea in chat.");
-                    break;
+                case ENTER_CHAT_RESPONSE: break;
             }
         } catch (Exception e) {
-            Log.e("CHAT_UI", "❌ Eroare procesare pachet: " + e.getMessage());
             e.printStackTrace();
         }
     }
-
-    // =================================================================
-    // 2. TRIMITERE
-    // =================================================================
 
     public void handleMessage(View view) {
         EditText messageBox = findViewById(R.id.editTextMessage);
@@ -197,32 +241,44 @@ public class ConversationActivity extends AppCompatActivity {
 
         if (text.isEmpty()) return;
 
-        Log.d("CHAT_UI", "📤 Trimit mesaj: " + text);
+        SecretKey key = keyManager.getKey(currentChatId);
 
-        byte[] contentToSend = text.getBytes();
-        Message msg = new Message(0, contentToSend, 0, TcpConnection.getCurrentUserId(), currentChatId);
+        if (key == null) {
+            Toast.makeText(this, "⏳ Se negociază criptarea...", Toast.LENGTH_SHORT).show();
+            checkAndGenerateKey();
+            return;
+        }
 
-        NetworkPacket packet = new NetworkPacket(PacketType.SEND_MESSAGE, TcpConnection.getCurrentUserId(), msg);
-        TcpConnection.sendPacket(packet);
+        try {
+            byte[] encryptedContent = CryptoHelper.encryptAndPack(key, text);
+            Message msg = new Message(0, encryptedContent, 0, TcpConnection.getCurrentUserId(), currentChatId);
+            NetworkPacket packet = new NetworkPacket(PacketType.SEND_MESSAGE, TcpConnection.getCurrentUserId(), msg);
+            TcpConnection.sendPacket(packet);
 
-        messageBox.setText("");
+            messageBox.setText("");
+        } catch (Exception e) {
+            Toast.makeText(this, "Eroare Criptare!", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void performEdit(int messageId, String newText) {
-        byte[] finalContent = newText.getBytes();
-        ChatDtos.EditMessageDto dto = new ChatDtos.EditMessageDto(messageId, finalContent);
-        NetworkPacket packet = new NetworkPacket(PacketType.EDIT_MESSAGE_REQUEST, TcpConnection.getCurrentUserId(), dto);
-        TcpConnection.sendPacket(packet);
+        SecretKey key = keyManager.getKey(currentChatId);
+        if (key == null) return;
+
+        try {
+            byte[] encryptedContent = CryptoHelper.encryptAndPack(key, newText);
+            ChatDtos.EditMessageDto dto = new ChatDtos.EditMessageDto(messageId, encryptedContent);
+            NetworkPacket packet = new NetworkPacket(PacketType.EDIT_MESSAGE_REQUEST, TcpConnection.getCurrentUserId(), dto);
+            TcpConnection.sendPacket(packet);
+        } catch (Exception e) {
+            Toast.makeText(this, "Fail Edit Encrypt", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void performDelete(int messageId) {
         NetworkPacket packet = new NetworkPacket(PacketType.DELETE_MESSAGE_REQUEST, TcpConnection.getCurrentUserId(), messageId);
         TcpConnection.sendPacket(packet);
     }
-
-    // =================================================================
-    // 3. HELPERE
-    // =================================================================
 
     private void sendEnterChatRequest() {
         if (currentChatId != -1) {

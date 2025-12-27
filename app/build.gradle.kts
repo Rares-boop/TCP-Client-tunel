@@ -80,4 +80,5 @@ dependencies {
 
     // Fix pentru SQLCipher pe Android modern
     implementation("androidx.sqlite:sqlite:2.4.0")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }

@@ -46,7 +46,6 @@ public class MainActivity extends AppCompatActivity {
 
     AlertDialog dialog;
 
-    // Spinner pt Add Chat
     private Spinner pendingSpinner;
     private List<String> pendingRawUsers;
 
@@ -75,7 +74,6 @@ public class MainActivity extends AppCompatActivity {
         );
         recyclerView.setAdapter(adapter);
 
-        // Back Handling (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             OnBackInvokedCallback callback = () -> {
                 if (dialog != null && dialog.isShowing()) {
@@ -87,11 +85,6 @@ public class MainActivity extends AppCompatActivity {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
         }
 
-        // =================================================================
-        // 1. PORNIM ASCULTAREA (TUNEL ACTIV)
-        // =================================================================
-        // Nu mai avem nevoie de IdentityManager sau publish keys.
-        // Doar pornim "Postasul" sa asculte ce vine de la server.
         TcpConnection.startReading();
     }
 
@@ -99,20 +92,15 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
 
-        Socket socket = TcpConnection.socket; // Folosim getter-ul corect daca exista, sau variabila statica
-        // Verificam conexiunea
+        Socket socket = TcpConnection.socket;
         if (socket == null || socket.isClosed() || !socket.isConnected()) {
             attemptAutoReconnect();
         } else {
-            // =================================================================
-            // 2. NE ABONAM LA PACHETE SI CEREM DATE
-            // =================================================================
             TcpConnection.setPacketListener(this::handlePacketOnUI);
             refreshConversations();
         }
     }
 
-    // Wrapper pentru UI Thread (listener-ul ruleaza pe background)
     private void handlePacketOnUI(NetworkPacket packet) {
         runOnUiThread(() -> handlePacket(packet));
     }
@@ -156,15 +144,24 @@ public class MainActivity extends AppCompatActivity {
                     updateSpinnerData(serverList);
                 } catch (Exception e) { e.printStackTrace(); }
                 break;
+
+            case EXCHANGE_SESSION_KEY:
+                try {
+                    ChatDtos.SessionKeyDto keyDto = gson.fromJson(packet.getPayload(), ChatDtos.SessionKeyDto.class);
+
+                    ClientKeyManager keyMgr = new ClientKeyManager(this);
+
+                    keyMgr.saveKey(keyDto.chatId, keyDto.aesKeyBase64);
+
+                    Log.d("MAIN_KEY", "🔑 [SYNC] Cheie primita si salvata pentru ChatID: " + keyDto.chatId);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                break;
         }
     }
 
-    // ========================================================================
-    // METODE TRIMITERE (SIMPLIFICATE)
-    // ========================================================================
-
     private void refreshConversations() {
-        // Trimitem cererea. TcpConnection o va cripta automat prin Tunel.
         NetworkPacket req = new NetworkPacket(PacketType.GET_CHATS_REQUEST, TcpConnection.getCurrentUserId());
         TcpConnection.sendPacket(req);
     }
@@ -191,7 +188,7 @@ public class MainActivity extends AppCompatActivity {
         TcpConnection.sendPacket(p);
 
         new android.os.Handler().postDelayed(() -> {
-            TcpConnection.stopReading(); // Oprim listener-ul
+            TcpConnection.stopReading();
             TcpConnection.close();
             runOnUiThread(() -> {
                 SharedPreferences prefs = SecureStorage.getEncryptedPrefs(MainActivity.this);
@@ -221,10 +218,6 @@ public class MainActivity extends AppCompatActivity {
         setupSpinner(pendingSpinner, displayNames.toArray(new String[0]));
     }
 
-    // ========================================================================
-    // UI HELPERE (RAMAN LA FEL)
-    // ========================================================================
-
     @SuppressLint({"GestureBackNavigation", "MissingSuperCall"})
     @Override
     public void onBackPressed() {
@@ -240,9 +233,6 @@ public class MainActivity extends AppCompatActivity {
         intent.putExtra("CHAT_ID", chat.getId());
         intent.putExtra("CHAT_NAME", chat.getName());
 
-        // Calculam ID-ul partenerului (Simplificat pt grupuri de 2)
-        // Daca vrei sa fie dinamic, trebuie sa ai lista de membri in GroupChat object
-        // Momentan lasam asa sau trimitem 0 daca serverul se ocupa de broadcast
         int partnerId = 0;
         intent.putExtra("PARTNER_ID", partnerId);
 
@@ -352,9 +342,6 @@ public class MainActivity extends AppCompatActivity {
         finish();
     }
 
-    // =================================================================
-    // AUTO RECONNECT (Fara Identity Check)
-    // =================================================================
     private void attemptAutoReconnect() {
         SharedPreferences preferences = SecureStorage.getEncryptedPrefs(getApplicationContext());
         String savedUser = preferences.getString("username", null);
@@ -364,15 +351,12 @@ public class MainActivity extends AppCompatActivity {
         new Thread(() -> {
             try {
                 ConfigReader configReader = new ConfigReader(this);
-                // 1. Conectare (Handshake Automat)
                 TcpConnection.connect(configReader.getServerIp(), configReader.getServerPort());
 
-                // 2. Login
                 ChatDtos.AuthDto authDto = new ChatDtos.AuthDto(savedUser, savedPassword);
                 NetworkPacket req = new NetworkPacket(PacketType.LOGIN_REQUEST, 0, authDto);
                 TcpConnection.sendPacket(req);
 
-                // 3. Citire manuala pt confirmare Login
                 NetworkPacket resp = TcpConnection.readNextPacket();
 
                 if (resp.getType() == PacketType.LOGIN_RESPONSE) {
@@ -383,7 +367,6 @@ public class MainActivity extends AppCompatActivity {
                         runOnUiThread(() -> {
                             Toast.makeText(this, "Reconectat automat!", Toast.LENGTH_SHORT).show();
 
-                            // 4. Pornim ascultarea si reimprospatam lista
                             TcpConnection.startReading();
                             TcpConnection.setPacketListener(this::handlePacketOnUI);
                             refreshConversations();
